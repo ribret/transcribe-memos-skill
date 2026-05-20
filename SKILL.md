@@ -133,7 +133,6 @@ Wenn nicht: **Einrichtungsdialog** mit folgenden Fragen (in einem `AskUserQuesti
 
 „Wo sollen die Sprachmemos-Transkripte abgelegt werden? (Es werden Unterordner `transcribe/` und `transcribed/` angelegt.)"
 - A: `~/Documents/Sprachmemos/` *(Standard)*
-- B: `~/Documents/Claude/secondbrain/sources/sprachmemos/`
 - Other: eigener Pfad
 
 ### Frage 2 — Sprachmemos-Quellordner
