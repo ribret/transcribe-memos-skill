@@ -1,0 +1,19 @@
+[
+  {"query": "neue Sprachmemos transkribieren", "should_trigger": true},
+  {"query": "Memos transkribieren", "should_trigger": true},
+  {"query": "voice memos transcribe", "should_trigger": true},
+  {"query": "transkribiere meine letzten Aufnahmen aus der Sprachmemos-App", "should_trigger": true},
+  {"query": "ich habe ein paar Voice Memos auf meinem Mac, kannst du die in Text umwandeln?", "should_trigger": true},
+  {"query": "wandele meine .m4a-Aufnahmen aus Sprachmemos in lesbaren Text um", "should_trigger": true},
+  {"query": "transkribiere bitte die Sprachaufnahmen aus dem Ordner Memo in Voice Memos", "should_trigger": true},
+  {"query": "ich brauche Transkripte von meinen Apple Sprachmemos mit Zeitmarken", "should_trigger": true},
+
+  {"query": "schreib einen LinkedIn-Post über die Bedeutung von Sprachmemos im Arbeitsalltag", "should_trigger": false},
+  {"query": "humanisiere bitte diesen Text, er klingt zu sehr nach ChatGPT", "should_trigger": false},
+  {"query": "ich habe ein neues E-Book in den Downloads, kannst du es aufräumen?", "should_trigger": false},
+  {"query": "hilf mir beim Optimieren meines Lebenslaufs für die Bewerbung", "should_trigger": false},
+  {"query": "wie funktioniert noScribe als Software und welche Modelle nutzt es?", "should_trigger": false},
+  {"query": "transkribiere mir bitte dieses YouTube-Video, das ich verlinkt habe", "should_trigger": false},
+  {"query": "was ist die beste KI für deutsche Audio-Transkription generell?", "should_trigger": false},
+  {"query": "lies mir diese PDF-Datei vor und gib mir eine Zusammenfassung", "should_trigger": false}
+]
