@@ -14,6 +14,27 @@ Nur auf explizite manuelle Anfrage — **nie automatisch**:
 - „neue Sprachmemos transkribieren", „Memos transkribieren"
 - „voice memos transcribe"
 
+## Wann ein anderer Skill richtig wäre (Übergangs-Routing)
+
+Dieser Skill verarbeitet **nur lokale Audio-Dateien** (`.m4a`, `.qta`) aus dem konfigurierten Sprachmemos-Ordner. Bei abweichendem Medium nicht selbst probieren — Claude weist Richard auf den passenden Skill hin und schlägt vor, zu wechseln:
+
+| Medium / URL-Pattern | Richtiger Capture-Pfad | Status |
+|----------------------|------------------------|--------|
+| YouTube-URLs (`youtube.com/watch`, `youtu.be/`) | Skill `transcribe-youtube` | aktiv |
+| **Apple Podcasts-URLs** | yt-dlp ApplePodcasts-Extractor → `.m4a` in den hier konfigurierten Eingangsordner → diesen Skill triggern | **aktiv** (verifiziert 2026-05-24) |
+| Andere Podcast-URLs (Spotify, RSS-Feeds, etc.) | yt-dlp probieren; bei Erfolg analog. Bei Misserfolg: RSS-Feed-Workaround | teilweise |
+| LinkedIn-Posts, Web-Artikel, TED-Talks | Aktuell: WebFetch ad-hoc. Geplant: `clip-web`-Skill | offen |
+
+**Konkretes yt-dlp-Snippet für Apple Podcasts** (aus dem `transcribe-youtube`-venv, oder beliebigem yt-dlp ≥ 2024):
+```bash
+yt-dlp --extract-audio --audio-format m4a \
+  -o "$EINGANGSORDNER/YYYY-MM-DD Titel.m4a" \
+  "https://podcasts.apple.com/.../id...?i=..."
+```
+Datei landet als `.m4a` im Sprachmemos-Eingangsordner und wird beim nächsten Lauf automatisch mitverarbeitet.
+
+Übergangs-Verhalten gilt, bis der Skill-Orchestrierungs-Layer aktiv ist (siehe Memory `project-skill-orchestration-layer` + Inventar `[[Claude Skills]]` im Memex). Dann routet ein Meta-Agent automatisch, manuelles Hinweisen entfällt.
+
 ---
 
 ## Schritt 0 — Plattform-Check
@@ -262,80 +283,57 @@ User informieren: Anzahl neuer Memos und kurzer Hinweis auf Laufzeit.
 
 ---
 
-## Schritt 4 — Transkription mit Fortschrittsanzeige
+## Schritt 4 — Transkription über den Queue-Runner mit Live-Statusseite
 
-Für jede Datei in `NEW` (sequenziell, da noScribe CPU/GPU voll auslastet):
+Die Transkription läuft **nicht** mehr als einzelne noScribe-Aufrufe mit `Monitor`-Polling. Zwei empirisch belegte Gründe (2026-07-02, Quellcode-Analyse noScribe 0.7.1):
 
-### 4.1 Audio-Länge ermitteln (für Schätzung)
+1. **noScribe wirft den Prozentwert im `--no-gui`-Modus weg.** `set_progress()` steigt bei Headless sofort aus; die Prozente existieren nur in GUI-Widgets, nie in stdout oder Log. Log-Tailing nach Prozent konnte nie funktionieren.
+2. **Claude kann während eines Hintergrundjobs nicht live in den Chat tickern.** Der Zug endet, Re-Invoke erst bei Fertigstellung. Deshalb kamen Zwischenstände nie an.
 
-```bash
-DURATION_SEC=$(/usr/bin/afinfo "$SRC_FILE" 2>/dev/null | awk '/estimated duration/ {print int($3)}')
-# Format mm:ss für Anzeige
-MM=$((DURATION_SEC / 60)); SS=$((DURATION_SEC % 60))
-echo "Audio-Länge: ${MM}:$(printf %02d $SS) min"
-```
+Lösung: das mitgelieferte Skript **`transcribe_queue.py`** (im Skill-Ordner) übernimmt die **gesamte Queue** und rendert eine selbst-aktualisierende, **JS-freie** Statusseite (`_status/index.html`, `<meta refresh>` alle 2 s), die unabhängig vom Claude-Zyklus läuft. Echter Fortschritt kommt aus dem live-geflushten noScribe-Log (`~/Library/Application Support/noScribe/log/<stem>.log`): Sprechererkennung aus den sprachunabhängigen `segmentation:/embeddings:`-Markern, Transkription aus der letzten `[HH:MM:SS]`-Audio-Zeitmarke ÷ Audiolänge.
 
-Schätzungsformel für `precise` auf Apple Silicon: **Verarbeitung ≈ 0,5 × Audio-Länge** (Faustwert; variiert je nach Mac). Bei `auto`-Sprache + Speaker-Detection: × 1,2.
+### 4.1 Jobliste schreiben
 
-### 4.2 noScribe im Hintergrund starten, Output mitschneiden
-
-**Wichtig: Feature-Flags müssen explizit gesetzt werden.** Beobachtet: noScribe übernimmt sonst Werte aus der GUI-Konfiguration (z. B. `Zeitmarken: False` im Output-Header), selbst wenn der CLI-Flag suggeriert anders. Daher beide Flags (Zeitmarken, Überlappung) **immer explizit** mit Positiv- oder Negativ-Form mitgeben.
+`NEW[]` (absolute Quellpfade aus Schritt 3) als JSON-Array in eine Datei schreiben, z. B. im Scratchpad:
 
 ```bash
-# Endung der konkreten Audiodatei (Default m4a, kann auch qta sein)
-EXT="${BASE##*.}"
-STEM="${BASE%.*}"
-
-LOG="$TRANSCRIBE/${STEM}.log"
-TMP_TXT="$TRANSCRIBE/${STEM}.txt"
-cp "$SRC_FILE" "$TRANSCRIBE/$BASE"
-
-# Flags aus Konfig dynamisch
-TS_FLAG=$([ "$TIMESTAMPS" = "true" ] && echo "--timestamps" || echo "--no-timestamps")
-OV_FLAG=$([ "$OVERLAPPING" = "true" ] && echo "--overlapping" || echo "--no-overlapping")
-
-"$NOSCRIBE" --no-gui --model precise --language "$LANG" \
-  --speaker-detection auto $TS_FLAG $OV_FLAG --no-disfluencies \
-  "$TRANSCRIBE/$BASE" "$TMP_TXT" > "$LOG" 2>&1 &
-NOSCRIBE_PID=$!
-START=$(date +%s)
+JOBS="<scratch>/jobs.json"
+STATUS_DIR="$(dirname "$TRANSCRIBE")/_status"   # neben transcribe/ und transcribed/
+MANIFEST="<scratch>/manifest.json"
+python3 -c "import json,sys; json.dump(sys.argv[1:], open('$JOBS','w'))" "${NEW[@]}"
 ```
 
-**Verifikation nach Abschluss**: Im Header der erzeugten `.txt` steht eine Zeile mit den verwendeten Settings (`Zeitmarken: True/False`, `Überlappende Sprache: True/False`). Diese Zeile lesen und mit der Konfig vergleichen. Falls Mismatch (z. B. `Zeitmarken: False` trotz `--timestamps`): den User darauf hinweisen — vermutlich ist die installierte noScribe-Version älter oder hat einen Bug; im Zweifel `--help` der lokalen Installation prüfen.
+### 4.2 Runner im Hintergrund starten
 
-**Konkret im Skill-Lauf**: Den noScribe-Aufruf mit `Bash` und `run_in_background: true` starten — die Background-Task wird automatisch getrackt, und Claude wird nach Fertigstellung notifiziert. Während sie läuft: mit `Monitor` periodisch den `$LOG`-Tail beobachten, und alle ~45 Sekunden Zwischenstand an User berichten.
+Mit `Bash` und **`run_in_background: true`** (eine einzige langlaufende Task für die ganze Queue):
 
-### 4.3 Zwischenstand pro Datei
+```bash
+python3 "$HOME/.claude/skills/transcribe-memos/transcribe_queue.py" \
+  --config "$HOME/.config/transcribe-memos/config.json" \
+  --jobs "$JOBS" --status-dir "$STATUS_DIR" --manifest "$MANIFEST"
+```
 
-Format der User-Meldung (alle 30–60 Sekunden, abhängig von Laufzeit):
+Der Runner öffnet die Statusseite automatisch im Browser (`open`). Er kopiert jede Quelle nach `transcribe_dir`, ruft noScribe headless mit den Konfig-Flags auf (`--model`, `--language`, `--speaker-detection`, `--timestamps/--no-timestamps`, `--overlapping/--no-overlapping`, `--no-disfluencies`), liest live das noScribe-Log und schreibt Phase + echten Prozentwert in die Statusseite.
 
-> Datei **2 / 5** — `2026-05-19 ...m4a` (Audio 12:34 min)
-> Läuft seit **3:20 min**, geschätzt fertig in ca. **3 min**.
-> Letzte noScribe-Meldung: `<letzte nichtleere Zeile aus $LOG>`
+Dem User **einmal** den Pfad zur Statusseite nennen (`$STATUS_DIR/index.html`), dann auf die Fertigstellung der Hintergrund-Task warten. Kein Zwischenstand-Gepolle im Chat nötig, die Statusseite trägt die Live-Info. (`--no-open` unterdrückt das Browser-Öffnen, z. B. bei reinem Batch.)
 
-noScribe-Phasen, die in der Logfile typischerweise auftauchen und als Status-Snippets brauchbar sind:
-- „Loading model…" / „Loaded model"
-- „Transcribing audio…" (oft mit Segment-Nummern)
-- „Identifying speakers…" (bei Speaker-Detection)
-- „Finished"
+### 4.3 Manifest lesen und prüfen
 
-Bei jedem Status-Update den `tail -n 5 "$LOG" | grep -v '^$' | tail -n 1` extrahieren und in die Meldung einbauen.
-
-### 4.4 Auf Abschluss warten und Ergebnis prüfen
-
-Wenn die Background-Task fertig meldet: `$TMP_TXT` lesen. Wenn leer oder Exit-Code ≠ 0: Fehler an User, **nichts** committen, weiter mit nächster Datei.
+Nach Fertigstellung `manifest.json` lesen. Je Job: `{src, name, out_txt, work_audio, state, duration, elapsed, error}`.
+- `state == "done"`: in Schritt 5/6 weiterverarbeiten (`out_txt` liegt in `transcribe_dir`).
+- `state == "failed"`: **nichts** committen, im Abschlussbericht (Schritt 7) einzeln mit `error` melden.
 
 ---
 
 ## Schritt 5 — Dateiname generieren
 
-Lies die ersten ~1500 Zeichen von `$TMP_TXT`. Generiere einen **inhaltlich passenden Dateinamen** mit max. **4 Wörtern**:
+Pro Job mit `state == "done"`: lies die ersten ~1500 Zeichen von `out_txt` (aus dem Manifest). Generiere einen **inhaltlich passenden Dateinamen** mit max. **4 Wörtern**:
 - Sprache des Memos beibehalten
 - Substantive, keine Füllwörter
 - Spaces ok, keine Sonderzeichen außer `-`
 - Großschreibung wie zielsprachenüblich
 
-Aufnahmedatum: `REC_DATE=$(stat -f "%Sm" -t "%Y-%m-%d" "$SRC_FILE")`.
+Aufnahmedatum: `REC_DATE=$(stat -f "%Sm" -t "%Y-%m-%d" "<src>")` (Manifest-Feld `src`).
 
 Finaler Name: `<REC_DATE> <kurztitel>.txt`. Bei Kollision: ` (2)`, ` (3)` anhängen.
 
@@ -343,21 +341,23 @@ Finaler Name: `<REC_DATE> <kurztitel>.txt`. Bei Kollision: ` (2)`, ` (3)` anhän
 
 ## Schritt 6 — Committen
 
-Nur wenn Transkript nicht leer:
+Pro Job mit `state == "done"` (Felder aus dem Manifest: `out_txt`, `work_audio`, `src`, `name`):
 
 ```bash
 FINAL_TXT="$TRANSCRIBED/$REC_DATE <kurztitel>.txt"
-mv "$TMP_TXT" "$FINAL_TXT"
-rm -f "$LOG"
+mv "<out_txt>" "$FINAL_TXT"
 
+EXT="${name##*.}"
 case "$ORIGINALS" in
-  keep)                rm "$TRANSCRIBE/$BASE" ;;
-  delete_with_archive) mv "$TRANSCRIBE/$BASE" "$TRANSCRIBED/$REC_DATE <kurztitel>.$EXT"; rm "$SRC_FILE" ;;
-  delete)              rm "$TRANSCRIBE/$BASE"; rm "$SRC_FILE" ;;
+  keep)                rm -f "<work_audio>" ;;
+  delete_with_archive) mv "<work_audio>" "$TRANSCRIBED/$REC_DATE <kurztitel>.$EXT"; rm -f "<src>" ;;
+  delete)              rm -f "<work_audio>"; rm -f "<src>" ;;
 esac
 
-echo "$BASE" >> "$PROCESSED"
+echo "<name>" >> "$PROCESSED"
 ```
+
+Die noScribe-Logdatei unter `~/Library/Application Support/noScribe/log/<stem>.log` bleibt liegen (nützlich für Nachschau); sie ist nicht Teil von `transcribe_dir` und muss nicht aufgeräumt werden.
 
 Bei `delete`/`delete_with_archive` zusätzlich: den DB-Eintrag in `CloudRecordings.db` für diese Aufnahme behält Sprachmemos als „verwaiste" Referenz. Das ist unkritisch — die App räumt das beim nächsten Start auf. Falls Sprachmemos die Aufnahme nach `rm` doch wieder herstellt (über iCloud-Re-Sync), greift der `.processed.txt`-Filter beim nächsten Lauf.
 
